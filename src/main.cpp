@@ -1,10 +1,8 @@
 #include "dag_scheduler.hpp"
 
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
-#include <mutex>
-#include <sstream>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -12,16 +10,11 @@
 namespace {
 
 void simulated_task(int id, int ms) {
-    std::ostringstream out;
-    out << "[START] task=" << id << " thread=" << std::this_thread::get_id() << '\n';
-    std::cout << out.str();
-
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-
-    std::cout << "[DONE ] task=" << id << '\n';
+    std::cout << "  user-task " << id << " done in " << ms << "ms\n";
 }
 
-dag::Dag build_branched_case() {
+dag::Dag build_demo_case() {
     dag::Dag g;
     g.add_task({1, [] { simulated_task(1, 120); }});
     g.add_task({2, [] { simulated_task(2, 180); }});
@@ -39,70 +32,74 @@ dag::Dag build_branched_case() {
     return g;
 }
 
-dag::Dag build_mixed_case() {
-    dag::Dag g;
-    g.add_task({1, [] { simulated_task(1, 100); }});
-    g.add_task({2, [] { simulated_task(2, 100); }});
-    g.add_task({3, [] { simulated_task(3, 100); }});
-    g.add_task({4, [] { simulated_task(4, 120); }});
-    g.add_task({5, [] { simulated_task(5, 90); }});
-
-    g.add_dependency(1, 4);
-    g.add_dependency(2, 4);
-    g.add_dependency(3, 5);
-    g.add_dependency(4, 5);
-    return g;
+void print_report(const dag::ExecutionReport& report) {
+    std::cout << "\n----- ExecutionReport -----\n";
+    std::cout << "Всего задач: " << report.total_tasks << '\n';
+    std::cout << "Успешно:     " << report.succeeded_tasks << '\n';
+    std::cout << "Провалено:   " << report.failed_tasks << '\n';
+    std::cout << "Время:       " << report.total_duration_ms << " мс\n";
+    if (!report.error_message.empty()) {
+        std::cout << "Ошибка:      " << report.error_message << '\n';
+    }
+    std::cout << "События (фактический порядок):\n";
+    for (const auto& event : report.events) {
+        std::cout << "  #" << event.sequence << " [" << event.timestamp_ms << "ms] task=" << event.task_id
+                  << " -> " << dag::to_string(event.state);
+        if (!event.message.empty()) {
+            std::cout << " (" << event.message << ")";
+        }
+        std::cout << '\n';
+    }
 }
 
-void run_case(const std::string& title, const dag::Dag& g, std::size_t threads) {
-    std::cout << "\n========================================\n";
-    std::cout << title << '\n';
-    std::cout << "========================================\n";
+void run_performance_experiment(const dag::Dag& dag) {
+    std::cout << "\n=== Эксперимент производительности (1/2/4 потока) ===\n";
 
-    dag::Scheduler scheduler(threads);
+    std::vector<std::size_t> threads{1, 2, 4};
+    std::vector<long long> durations;
 
-    const auto start = std::chrono::steady_clock::now();
-    scheduler.execute(g);
-    const auto finish = std::chrono::steady_clock::now();
+    for (std::size_t thread_count : threads) {
+        dag::Scheduler scheduler(thread_count, true);
+        const auto report = scheduler.execute(dag);
+        durations.push_back(report.total_duration_ms);
+        std::cout << "Потоков: " << thread_count << ", время: " << report.total_duration_ms << " мс\n";
+    }
 
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(finish - start);
-    std::cout << "Итоговое время: " << ms.count() << " мс\n";
-}
-
-void cycle_test() {
-    std::cout << "\n========================================\n";
-    std::cout << "Тест: обнаружение цикла\n";
-    std::cout << "========================================\n";
-
-    dag::Dag g;
-    g.add_task({1, [] { simulated_task(1, 50); }});
-    g.add_task({2, [] { simulated_task(2, 50); }});
-    g.add_dependency(1, 2);
-    g.add_dependency(2, 1);
-
-    try {
-        auto order = g.topological_sort();
-        (void)order;
-        throw std::runtime_error("Цикл не был обнаружен");
-    } catch (const std::runtime_error& e) {
-        std::cout << "Ожидаемый результат: " << e.what() << '\n';
+    const double base = static_cast<double>(durations.front());
+    std::cout << "\nУскорение относительно 1 потока:\n";
+    for (std::size_t i = 0; i < threads.size(); ++i) {
+        const double speedup = base / static_cast<double>(durations[i]);
+        std::cout << "  " << threads[i] << " потока(ов): x" << speedup << '\n';
     }
 }
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
-        std::cout << "Система планирования задач на основе DAG (C++)\n";
+        std::cout << "Система планирования задач на основе DAG (C++20)\n";
 
-        run_case("Сценарий 1: ветвящийся DAG", build_branched_case(), 4);
-        run_case("Сценарий 2: смешанный DAG", build_mixed_case(), 4);
-        cycle_test();
+        dag::Dag dag_graph;
+        if (argc > 1) {
+            const std::string input_path = argv[1];
+            std::cout << "Загрузка графа из файла: " << input_path << '\n';
+            dag_graph = dag::load_dag_from_file(input_path, [](int id) {
+                simulated_task(id, 100 + (id % 4) * 20);
+            });
+        } else {
+            dag_graph = build_demo_case();
+        }
+
+        dag::Scheduler scheduler(4, true);
+        const auto report = scheduler.execute(dag_graph);
+        print_report(report);
+
+        run_performance_experiment(dag_graph);
 
         std::cout << "\nВсе сценарии завершены успешно.\n";
-        return 0;
+        return EXIT_SUCCESS;
     } catch (const std::exception& e) {
         std::cerr << "Критическая ошибка: " << e.what() << '\n';
-        return 1;
+        return EXIT_FAILURE;
     }
 }

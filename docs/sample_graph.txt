@@ -1,0 +1,13 @@
+# Пример входного графа для DAG scheduler
+[TASKS]
+1
+2
+3
+4
+5
+
+[DEPENDENCIES]
+1 3
+2 3
+3 4
+3 5
